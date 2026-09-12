@@ -1,21 +1,28 @@
 """
-Job posting scanner for Oracle Recruiting Cloud / Oracle Fusion HCM career sites
-(this is the ATS American Express's careers.americanexpress.com runs on).
+Job posting scanner for company career sites.
+
+Supports two site "type"s, since different companies' career sites run on
+different platforms:
+
+  - "oracle_hcm": Oracle Recruiting Cloud / Oracle Fusion HCM (e.g. Amex).
+    Has a public JSON REST API — fast and reliable.
+  - "phenom_careerconnect": Phenom People / CareerConnect (e.g. United
+    Airlines). No public API; the search-results page is rendered by
+    JavaScript, so this uses a headless browser (Playwright) to load the
+    page and read job links off the rendered page.
 
 For each site in config.json, this script:
-  1. Calls the site's public recruitingCEJobRequisitions REST API
+  1. Fetches that site's current job postings (API call or browser render,
+     depending on type)
   2. Filters postings whose title matches one of the configured keywords
   3. Compares against seen_jobs.json to find NEW postings only
   4. Emails a summary of new postings via Gmail SMTP
   5. Updates seen_jobs.json so the same posting isn't emailed twice
-
-Add more sites to config.json (each needs: domain, site_number, and the
-location/mode params copied from that site's careers URL) to monitor more
-than one company/portal.
 """
 
 import json
 import os
+import re
 import smtplib
 import sys
 from email.mime.text import MIMEText
@@ -50,7 +57,7 @@ def save_seen_jobs(seen_ids):
         json.dump(sorted(seen_ids), f, indent=2)
 
 
-def fetch_jobs(site):
+def fetch_jobs_oracle(site):
     """Query the Oracle Fusion recruitingCEJobRequisitions API for one site.
 
     IMPORTANT: the `finder` parameter only accepts a fixed set of variable
@@ -59,7 +66,7 @@ def fetch_jobs(site):
     locationId, keyword. Note that 'locationLevel' and 'mode' — which show
     up in the browser's careers page URL — are NOT valid finder variables;
     they're frontend-only UI state and including them causes Oracle to
-    reject the whole finder as invalid (this was the earlier 400 error).
+    reject the whole finder as invalid.
 
     We also must NOT let requests percent-encode ';' and ',' in the finder
     value (that happens automatically via params=), so the URL is built
@@ -89,7 +96,7 @@ def fetch_jobs(site):
             # Oracle's documented schema. If the site's actual response uses
             # slightly different keys, this will silently skip jobs — check
             # the debug dump printed below (search logs for "RAW SAMPLE JOB")
-            # on the first run and adjust the .get() keys if needed.
+            # and adjust the .get() keys if needed.
             job_id = req.get("Id") or req.get("RequisitionId") or req.get("JobId")
             title = req.get("Title", "")
             posted = req.get("PostedDate") or req.get("ExternalPostedDate", "")
@@ -103,14 +110,87 @@ def fetch_jobs(site):
     return jobs
 
 
+def fetch_jobs_phenom(site):
+    """Render a Phenom People / CareerConnect search-results page with a
+    headless browser and pull job links off the rendered DOM.
+
+    Phenom career sites (careers.united.com and similar) build the job
+    listing client-side with JavaScript — the raw HTML has no job data in
+    it, so plain requests.get() won't work here (unlike the Oracle sites).
+    Playwright launches a real (headless) Chromium browser to run that
+    JavaScript first, then we read the result.
+
+    We identify job links by matching the confirmed URL shape used by this
+    platform: .../job/<jobId>/<slug-title>. If a site's actual markup
+    differs, this will silently find 0 jobs — check the debug dump printed
+    below (search logs for "DEBUG: dumping"), which lists every link found
+    on the page so the pattern can be adjusted.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError(
+            "Playwright is required for 'phenom_careerconnect' sites. "
+            "Install with: pip install playwright && playwright install chromium"
+        )
+
+    jobs = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        page.goto(site["search_url"], wait_until="networkidle", timeout=45000)
+        # Give client-side rendering extra time to finish populating results.
+        page.wait_for_timeout(3000)
+
+        anchors = page.query_selector_all('a[href*="/job/"]')
+        seen_hrefs = set()
+        for a in anchors:
+            href = a.get_attribute("href")
+            title = (a.inner_text() or "").strip()
+            if not href or not title or href in seen_hrefs:
+                continue
+            seen_hrefs.add(href)
+
+            if href.startswith("/"):
+                href = f"https://{site['domain']}{href}"
+
+            # Job ID is the path segment right after "/job/"
+            match = re.search(r"/job/([^/]+)/", href)
+            job_id = match.group(1) if match else href
+
+            jobs.append({"id": job_id, "title": title, "url": href})
+
+        if not jobs:
+            print("DEBUG: dumping all links found on the rendered page for troubleshooting:")
+            all_links = page.query_selector_all("a[href]")
+            for a in all_links[:40]:
+                print(f"  {a.get_attribute('href')}  |  {(a.inner_text() or '').strip()[:60]}")
+
+        browser.close()
+
+    return jobs
+
+
 def matches_keywords(title, keywords):
+    """Match keywords as whole words/phrases, not raw substrings.
+
+    Plain substring matching would let "software engineer i" match
+    "software engineer ii", "software engineer intern", etc. — anything
+    where "i" is glued to more letters. Word-boundary regex matching fixes
+    this: it only matches when the keyword's last character is followed by
+    a non-letter (space, dash, end of string, ...), not another letter.
+    """
     title_lower = title.lower()
-    return any(kw.lower() in title_lower for kw in keywords)
+    for kw in keywords:
+        pattern = r"\b" + re.escape(kw.lower()) + r"\b"
+        if re.search(pattern, title_lower):
+            return True
+    return False
 
 
 def send_email(new_matches):
-    gmail_user = "achyutnanda001@gmail.com"
-    gmail_app_password = "woiz ghpg slmx qslz"
+    gmail_user = os.environ["GMAIL_USER"]
+    gmail_app_password = os.environ["GMAIL_APP_PASSWORD"]
 
     lines = []
     for site_name, jobs in new_matches.items():
@@ -141,12 +221,23 @@ def main():
 
     for site in config["sites"]:
         print(f"Checking {site['name']}...")
+        site_type = site.get("type", "oracle_hcm")
+
         try:
-            jobs = fetch_jobs(site)
+            if site_type == "oracle_hcm":
+                jobs = fetch_jobs_oracle(site)
+            elif site_type == "phenom_careerconnect":
+                jobs = fetch_jobs_phenom(site)
+            else:
+                print(f"  ERROR: unknown site type '{site_type}'", file=sys.stderr)
+                continue
         except requests.RequestException as e:
             print(f"  ERROR fetching {site['name']}: {e}", file=sys.stderr)
-            if e.response is not None:
+            if getattr(e, "response", None) is not None:
                 print(f"  Response body: {e.response.text[:1000]}", file=sys.stderr)
+            continue
+        except Exception as e:
+            print(f"  ERROR fetching {site['name']}: {e}", file=sys.stderr)
             continue
 
         print(f"  Fetched {len(jobs)} total postings.")
@@ -160,7 +251,8 @@ def main():
                 continue
 
             seen_ids.add(unique_id)
-            job["url"] = site["careers_job_url_template"].format(job_id=job["id"])
+            if "url" not in job:
+                job["url"] = site["careers_job_url_template"].format(job_id=job["id"])
             site_matches.append(job)
 
         if site_matches:

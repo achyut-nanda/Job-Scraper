@@ -2,16 +2,26 @@
   "keywords": [
     "software engineer 1",
     "software engineer i",
-    "Software Engineer I",
-    "Software Engineer 1"
+    "developer 1",
+    "developer i",
+    "analyst",
+    "data scientist",
+    "machine learning"
   ],
   "sites": [
     {
       "name": "American Express - India",
+      "type": "oracle_hcm",
       "domain": "egug.fa.us2.oraclecloud.com",
       "site_number": "CX_1",
       "location_id": "300000000228786",
       "careers_job_url_template": "https://careers.americanexpress.com/en/sites/CX_1/job/{job_id}"
+    },
+    {
+      "name": "United Airlines - Gurugram",
+      "type": "phenom_careerconnect",
+      "domain": "careers.united.com",
+      "search_url": "https://careers.united.com/us/en/search-results?qcity=Gurugram&qstate=Haryana&qcountry=India"
     }
   ]
 }

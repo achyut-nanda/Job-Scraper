@@ -2,8 +2,8 @@ name: Job Scanner
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour, on the hour (UTC)
-  workflow_dispatch: {}    # lets you trigger it manually from the Actions tab
+    - cron: "0 * * * *" # every hour, on the hour (UTC)
+  workflow_dispatch: {} # lets you trigger it manually from the Actions tab
 
 permissions:
   contents: write
@@ -22,6 +22,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: playwright install --with-deps chromium
 
       - name: Run scanner
         env:
