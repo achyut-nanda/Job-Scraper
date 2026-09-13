@@ -1,7 +1,7 @@
 """
 Job posting scanner for company career sites.
 
-Supports two site "type"s, since different companies' career sites run on
+Supports three site "type"s, since different companies' career sites run on
 different platforms:
 
   - "oracle_hcm": Oracle Recruiting Cloud / Oracle Fusion HCM (e.g. Amex).
@@ -10,10 +10,13 @@ different platforms:
     Airlines). No public API; the search-results page is rendered by
     JavaScript, so this uses a headless browser (Playwright) to load the
     page and read job links off the rendered page.
+  - "generic_html": server-rendered career sites (e.g. NatWest, built on
+    the Radancy platform) where job listings are already present in the
+    raw HTML — a plain HTTP request + regex is enough, no browser needed.
 
 For each site in config.json, this script:
-  1. Fetches that site's current job postings (API call or browser render,
-     depending on type)
+  1. Fetches that site's current job postings (API call, browser render, or
+     plain HTML fetch, depending on type)
   2. Filters postings whose title matches one of the configured keywords
   3. Compares against seen_jobs.json to find NEW postings only
   4. Emails a summary of new postings via Gmail SMTP
@@ -142,6 +145,16 @@ def fetch_jobs_phenom(site):
         # Give client-side rendering extra time to finish populating results.
         page.wait_for_timeout(3000)
 
+        # Force sort order to "Most recent" so results are always freshest-first.
+        # This site's sort dropdown re-fetches results via JS on change
+        # (change.delegate="sortfilterSearch()"), so a URL parameter alone
+        # won't do it — we select the option in the rendered page itself.
+        try:
+            page.select_option("#sortselect", label="Most recent")
+            page.wait_for_timeout(3000)  # let sortfilterSearch() finish re-rendering
+        except Exception as e:
+            print(f"  WARNING: could not set sort order to 'Most recent': {e}")
+
         anchors = page.query_selector_all('a[href*="/job/"]')
         seen_hrefs = set()
         for a in anchors:
@@ -167,6 +180,62 @@ def fetch_jobs_phenom(site):
                 print(f"  {a.get_attribute('href')}  |  {(a.inner_text() or '').strip()[:60]}")
 
         browser.close()
+
+    return jobs
+
+
+def fetch_jobs_generic_html(site):
+    """Fetch job postings from a server-rendered career site (no browser or
+    special API needed) by requesting the page HTML directly and regex-
+    matching job links.
+
+    This works for sites like NatWest's (built on the Radancy platform)
+    where job listings — title, req ID, posted date — are already baked
+    into the raw HTML response, unlike the JS-rendered Phenom sites.
+
+    Job links are matched by the pattern /jobs/<numeric-id>-<slug>. Each
+    link's inner text bundles together title + location + brand + category
+    + req ID + posted date as one string (e.g. "Data Engineer Gurugram,
+    India NatWest Digital X Data, Insights & Analytics R-00284774 Posted 2
+    days ago") — we split that on the site's known location label
+    (config's "location_label") to isolate just the title.
+    """
+    resp = requests.get(site["search_url"], headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    html = resp.text
+
+    link_pattern = re.compile(
+        r'<a[^>]+href="(?P<href>/jobs/(?P<id>\d+)-[^"]+)"[^>]*>(?P<inner>.*?)</a>',
+        re.DOTALL,
+    )
+
+    jobs = []
+    seen_ids = set()
+    for m in link_pattern.finditer(html):
+        job_id = m.group("id")
+        if job_id in seen_ids:
+            continue
+        seen_ids.add(job_id)
+
+        inner_text = re.sub(r"<[^>]+>", " ", m.group("inner"))
+        inner_text = re.sub(r"\s+", " ", inner_text).strip()
+        if not inner_text:
+            continue
+
+        title = inner_text
+        location_label = site.get("location_label")
+        if location_label and location_label in inner_text:
+            title = inner_text.split(location_label)[0].strip()
+
+        if not title:
+            continue
+
+        url = f"https://{site['domain']}{m.group('href')}"
+        jobs.append({"id": job_id, "title": title, "url": url})
+
+    if not jobs:
+        print("DEBUG: no job links matched — dumping first 2000 chars of fetched HTML:")
+        print(html[:2000])
 
     return jobs
 
@@ -228,6 +297,8 @@ def main():
                 jobs = fetch_jobs_oracle(site)
             elif site_type == "phenom_careerconnect":
                 jobs = fetch_jobs_phenom(site)
+            elif site_type == "generic_html":
+                jobs = fetch_jobs_generic_html(site)
             else:
                 print(f"  ERROR: unknown site type '{site_type}'", file=sys.stderr)
                 continue

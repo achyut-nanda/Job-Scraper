@@ -6,7 +6,10 @@
     "developer i",
     "analyst",
     "data scientist",
-    "machine learning"
+    "machine learning",
+    "machine learning engineer",
+    "software engineer",
+    "data engineer"
   ],
   "sites": [
     {
@@ -22,6 +25,13 @@
       "type": "phenom_careerconnect",
       "domain": "careers.united.com",
       "search_url": "https://careers.united.com/us/en/search-results?qcity=Gurugram&qstate=Haryana&qcountry=India"
+    },
+    {
+      "name": "NatWest Group - Gurugram (Data/Analytics & Software Engineering, Permanent)",
+      "type": "generic_html",
+      "domain": "jobs.natwestgroup.com",
+      "search_url": "https://jobs.natwestgroup.com/search/data-insights-and-analytics-software-engineering-permanent/jobs/in/gurugram/country/india",
+      "location_label": "Gurugram, India"
     }
   ]
 }
