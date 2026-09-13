@@ -142,6 +142,16 @@ def fetch_jobs_phenom(site):
         # Give client-side rendering extra time to finish populating results.
         page.wait_for_timeout(3000)
 
+        # Force sort order to "Most recent" so results are always freshest-first.
+        # This site's sort dropdown re-fetches results via JS on change
+        # (change.delegate="sortfilterSearch()"), so a URL parameter alone
+        # won't do it — we select the option in the rendered page itself.
+        try:
+            page.select_option("#sortselect", label="Most recent")
+            page.wait_for_timeout(3000)  # let sortfilterSearch() finish re-rendering
+        except Exception as e:
+            print(f"  WARNING: could not set sort order to 'Most recent': {e}")
+
         anchors = page.query_selector_all('a[href*="/job/"]')
         seen_hrefs = set()
         for a in anchors:
