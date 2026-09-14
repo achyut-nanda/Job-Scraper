@@ -264,124 +264,68 @@ def fetch_jobs_jibe(site):
 
 
 def fetch_jobs_successfactors(site):
-    """Fetch job postings from a SAP SuccessFactors Recruiting Marketing
-    (RMK) / Career Site Builder career site (e.g. BT Group) via its
-    internal JSON API — no headless browser needed here, unlike the other
-    enterprise platforms we've hit so far.
+    """Fetch job postings from BT Group's SAP SuccessFactors career site by
+    rendering the search page with a headless browser and reading job
+    links off the DOM.
 
-    Two-step flow:
-      1. A GET request to the career site's base URL seeds a JSESSIONID
-         session cookie and embeds a CSRF token in the HTML (as a <meta>
-         tag, a data-csrf-token attribute, or an inline "x-csrf-token:"
-         marker — we try each pattern in order).
-      2. A POST to /services/recruiting/v1/jobs with that CSRF token as a
-         header and a fixed-shape JSON body (category/location filters,
-         page number). The JSESSIONID cookie rides along automatically via
-         the requests.Session().
+    NOTE: an earlier version of this function tried BT's internal JSON API
+    directly (a documented pattern for many SuccessFactors Career Site
+    Builder tenants: POST to /services/recruiting/v1/jobs with a CSRF
+    token). That path doesn't exist on BT's custom domain (jobs.bt.com) —
+    it returned the page shell's HTML instead of JSON, meaning BT's real
+    SAP tenant backend lives on a different, unlisted origin that the
+    custom domain only proxies the page shell for, not the API. Real
+    browser network inspection would be needed to find that origin, so
+    this falls back to the same reliable approach used for the other
+    JS-rendered platforms: render with Playwright, read the DOM.
 
-    The response has "jobSearchResult" (the postings on that page) and
-    "totalJobs" (used to know when to stop paging).
-
-    Config fields used:
-      - "base_url": the career site's root, e.g. "https://jobs.bt.com"
-      - "category_id": numeric category ID, visible in the site's own
-        "/go/<name>/<id>/" navigation links (e.g. BT's India category is
-        9053102 — this can be copied straight from the browser URL)
-      - "location_city" (optional): city name to filter on, matching the
-        site's own "facetFilters": {"jobLocationCity": [...]} shape
+    Job links are matched by the confirmed URL shape used by this site:
+    .../BTGroup/job/<slug>/<id>/ or .../BTGroup/job/<slug>/<id>-<locale>/.
     """
-    base_url = site["base_url"].rstrip("/")
-
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    resp = session.get(base_url, timeout=30)
-    resp.raise_for_status()
-    html = resp.text
-
-    csrf_token = None
-    for pattern in (
-        r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']',
-        r'data-csrf-token=["\']([^"\']+)["\']',
-        r'x-csrf-token["\']?\s*[:=]\s*["\']([^"\']+)["\']',
-    ):
-        m = re.search(pattern, html, re.IGNORECASE)
-        if m:
-            csrf_token = m.group(1)
-            break
-
-    if not csrf_token:
-        print("  WARNING: could not find a CSRF token on the homepage — the API call below may fail with 403/404.")
-    else:
-        print(f"  DEBUG: found CSRF token (first 12 chars): {csrf_token[:12]}...")
-
-    api_url = f"{base_url}/services/recruiting/v1/jobs"
-    post_headers = {"Content-Type": "application/json"}
-    if csrf_token:
-        post_headers["x-csrf-token"] = csrf_token
-
-    facet_filters = {}
-    if site.get("location_city"):
-        facet_filters["jobLocationCity"] = [site["location_city"]]
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError(
+            "Playwright is required for 'successfactors_rmk' sites. "
+            "Install with: pip install playwright && playwright install chromium"
+        )
 
     jobs = []
-    page_number = 0
-    total_jobs = None
-    last_data = None
-
-    while True:
-        payload = {
-            "locale": "en_US",
-            "pageNumber": page_number,
-            "sortBy": "",
-            "keywords": "",
-            "location": "",
-            "facetFilters": facet_filters,
-            "brand": "",
-            "skills": [],
-            "categoryId": site.get("category_id", ""),
-            "alertId": "",
-            "rcmCandidateId": "",
-        }
-        resp = session.post(api_url, headers=post_headers, json=payload, timeout=30)
-        resp.raise_for_status()
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        page.goto(site["search_url"], wait_until="domcontentloaded", timeout=45000)
         try:
-            data = resp.json()
-        except ValueError:
-            print(f"  DEBUG: POST to {api_url} returned non-JSON content.")
-            print(f"  DEBUG: status={resp.status_code} content-type={resp.headers.get('Content-Type')}")
-            print(f"  DEBUG: first 1000 chars of response body:\n{resp.text[:1000]}")
-            break
-        last_data = data
+            page.wait_for_selector('a[href*="/job/"]', timeout=30000)
+        except Exception as e:
+            print(f"  WARNING: job links never appeared on the page: {e}")
 
-        results = data.get("jobSearchResult", [])
-        if total_jobs is None:
-            total_jobs = data.get("totalJobs", len(results))
+        anchors = page.query_selector_all('a[href*="/job/"]')
+        seen_hrefs = set()
+        for a in anchors:
+            href = a.get_attribute("href")
+            title = (a.inner_text() or "").strip()
+            if not href or not title or href in seen_hrefs:
+                continue
+            seen_hrefs.add(href)
 
-        if not results:
-            break
+            if href.startswith("/"):
+                href = f"https://{site['domain']}{href}"
 
-        for job in results:
-            job_id = job.get("id") or job.get("jobId")
-            title = job.get("title") or job.get("jobTitle") or job.get("postingTitle", "")
-            url_title = job.get("url_title") or job.get("urlTitle", "")
-            locales = job.get("locales") or ["en_US"]
-            locale = locales[0] if locales else "en_US"
-            if job_id and title:
-                job_url = (
-                    f"{base_url}/job/{url_title}/{job_id}-{locale}"
-                    if url_title
-                    else f"{base_url}/job/{job_id}-{locale}"
-                )
-                jobs.append({"id": str(job_id), "title": title, "url": job_url})
+            # Job ID is the trailing numeric segment, optionally
+            # followed by "-<locale>" (e.g. .../54231-en_GB/).
+            match = re.search(r"/(\d+)(?:-\w+)?/?(?:\?.*)?$", href)
+            job_id = match.group(1) if match else href
 
-        page_number += 1
-        if len(jobs) >= total_jobs or page_number > 20:  # safety cap on pagination
-            break
+            jobs.append({"id": job_id, "title": title, "url": href})
 
-    if not jobs and last_data is not None:
-        print("DEBUG: no jobs parsed — RAW response from the SuccessFactors API:")
-        print(json.dumps(last_data, indent=2)[:2000])
+        if not jobs:
+            print("DEBUG: dumping all links found on the rendered page for troubleshooting:")
+            all_links = page.query_selector_all("a[href]")
+            for a in all_links[:40]:
+                print(f"  {a.get_attribute('href')}  |  {(a.inner_text() or '').strip()[:60]}")
+
+        browser.close()
 
     return jobs
 

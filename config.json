@@ -45,9 +45,7 @@
       "name": "BT Group - Gurugram, India",
       "type": "successfactors_rmk",
       "domain": "jobs.bt.com",
-      "base_url": "https://jobs.bt.com",
-      "category_id": "9053102",
-      "location_city": "Gurugram"
+      "search_url": "https://jobs.bt.com/go/India/9053102/?sortBy=date&pageNumber=0&markerViewed=&carouselIndex=&facetFilters=%7B%22jobLocationCity%22%3A%5B%22Gurugram%22%5D%7D"
     }
   ]
 }
