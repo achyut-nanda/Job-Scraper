@@ -33,6 +33,12 @@
       "domain": "jobs.natwestgroup.com",
       "search_url": "https://jobs.natwestgroup.com/search/data-insights-and-analytics-software-engineering-permanent/jobs/in/gurugram/country/india",
       "location_label": "Gurugram, India"
+    },
+    {
+      "name": "Cvent - Gurugram (Product Management / Software Development / IT, Hybrid)",
+      "type": "jibe_icims",
+      "domain": "careers.cvent.com",
+      "search_url": "https://careers.cvent.com/jobs?stretchUnit=MILES&stretch=10&location=Gurugram&sortBy=posted_date&descending=true&page=1&view=search&tags4=Hybrid&locations=Gurugram,,India&categories=Product%20Management%7CSoftware%20Development%7CIT"
     }
   ]
 }

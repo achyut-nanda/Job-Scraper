@@ -14,6 +14,10 @@ different platforms:
     the Radancy platform) that use Cloudflare bot-protection — needs a
     headless browser too (to get past Cloudflare's JS challenge), but once
     past that, job data is plain HTML rather than a JS-rendered SPA.
+  - "jibe_icims": Jibe/iCIMS career sites (e.g. Cvent) — client-side
+    rendered like Phenom, no public API or bot-protection gate observed.
+    Uses a headless browser and matches job links by the confirmed
+    ".../jobs/<numeric-id>" URL shape.
 
 For each site in config.json, this script:
   1. Fetches that site's current job postings (API call, browser render, or
@@ -193,6 +197,68 @@ def fetch_jobs_phenom(site):
     return jobs
 
 
+def fetch_jobs_jibe(site):
+    """Render a Jibe/iCIMS career site (e.g. Cvent) with a headless browser
+    and pull job links off the rendered DOM.
+
+    Jibe career sites build the job listing client-side with JavaScript —
+    plain requests.get() returns almost no content, so this needs Playwright
+    the same way the Phenom sites do.
+
+    Job links are matched by the confirmed URL shape used by this platform:
+    .../jobs/<numeric-id> (e.g. careers.cvent.com/jobs/10074?lang=en-us).
+    If a site's actual markup differs, this will silently find 0 jobs —
+    check the debug dump printed below (search logs for "DEBUG: dumping").
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError(
+            "Playwright is required for 'jibe_icims' sites. "
+            "Install with: pip install playwright && playwright install chromium"
+        )
+
+    jobs = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        page.goto(site["search_url"], wait_until="domcontentloaded", timeout=45000)
+        try:
+            page.wait_for_selector('a[href*="/jobs/"]', timeout=30000)
+        except Exception as e:
+            print(f"  WARNING: job links never appeared on the page: {e}")
+
+        anchors = page.query_selector_all('a[href*="/jobs/"]')
+        seen_hrefs = set()
+        for a in anchors:
+            href = a.get_attribute("href")
+            title = (a.inner_text() or "").strip()
+            if not href or not title or href in seen_hrefs:
+                continue
+
+            match = re.search(r"/jobs/(\d+)", href)
+            if not match:
+                continue  # not an individual job link (e.g. nav/category links)
+
+            seen_hrefs.add(href)
+            job_id = match.group(1)
+
+            if href.startswith("/"):
+                href = f"https://{site['domain']}{href}"
+
+            jobs.append({"id": job_id, "title": title, "url": href})
+
+        if not jobs:
+            print("DEBUG: dumping all links found on the rendered page for troubleshooting:")
+            all_links = page.query_selector_all("a[href]")
+            for a in all_links[:40]:
+                print(f"  {a.get_attribute('href')}  |  {(a.inner_text() or '').strip()[:60]}")
+
+        browser.close()
+
+    return jobs
+
+
 def fetch_jobs_generic_html(site):
     """Fetch job postings from a career site by rendering it with a headless
     browser and regex-matching job links from the rendered HTML.
@@ -337,6 +403,8 @@ def main():
                 jobs = fetch_jobs_phenom(site)
             elif site_type == "generic_html":
                 jobs = fetch_jobs_generic_html(site)
+            elif site_type == "jibe_icims":
+                jobs = fetch_jobs_jibe(site)
             else:
                 print(f"  ERROR: unknown site type '{site_type}'", file=sys.stderr)
                 continue
