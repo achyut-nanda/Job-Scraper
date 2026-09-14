@@ -11,8 +11,9 @@ different platforms:
     JavaScript, so this uses a headless browser (Playwright) to load the
     page and read job links off the rendered page.
   - "generic_html": server-rendered career sites (e.g. NatWest, built on
-    the Radancy platform) where job listings are already present in the
-    raw HTML — a plain HTTP request + regex is enough, no browser needed.
+    the Radancy platform) that use Cloudflare bot-protection — needs a
+    headless browser too (to get past Cloudflare's JS challenge), but once
+    past that, job data is plain HTML rather than a JS-rendered SPA.
 
 For each site in config.json, this script:
   1. Fetches that site's current job postings (API call, browser render, or
@@ -141,9 +142,17 @@ def fetch_jobs_phenom(site):
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(user_agent=HEADERS["User-Agent"])
-        page.goto(site["search_url"], wait_until="networkidle", timeout=45000)
-        # Give client-side rendering extra time to finish populating results.
-        page.wait_for_timeout(3000)
+        # "networkidle" never fires on this site — it has continuous
+        # background requests (analytics/polling) that never go fully
+        # quiet, so waiting for that just times out. "domcontentloaded" is
+        # enough; we then explicitly wait for a job link to actually
+        # appear, which is the real signal that client-side rendering
+        # finished populating results.
+        page.goto(site["search_url"], wait_until="domcontentloaded", timeout=45000)
+        try:
+            page.wait_for_selector('a[href*="/job/"]', timeout=30000)
+        except Exception as e:
+            print(f"  WARNING: job links never appeared on the page: {e}")
 
         # Force sort order to "Most recent" so results are always freshest-first.
         # This site's sort dropdown re-fetches results via JS on change
@@ -185,13 +194,23 @@ def fetch_jobs_phenom(site):
 
 
 def fetch_jobs_generic_html(site):
-    """Fetch job postings from a server-rendered career site (no browser or
-    special API needed) by requesting the page HTML directly and regex-
-    matching job links.
+    """Fetch job postings from a career site by rendering it with a headless
+    browser and regex-matching job links from the rendered HTML.
 
-    This works for sites like NatWest's (built on the Radancy platform)
-    where job listings — title, req ID, posted date — are already baked
-    into the raw HTML response, unlike the JS-rendered Phenom sites.
+    NatWest's site (built on the Radancy platform) sits behind Cloudflare's
+    bot-detection challenge ("Just a moment..." interstitial) — a plain
+    requests.get() gets an immediate 403 because Cloudflare can tell it's
+    not a real browser (no JS execution, no browser fingerprint). A real
+    (headless) browser can usually get past Cloudflare's basic JS challenge
+    automatically within a few seconds, since it actually executes the
+    challenge script like a normal visitor would.
+
+    Caveat: Cloudflare's bot-detection evolves over time, and there's no
+    guarantee this keeps working indefinitely — if it starts failing again
+    later, that's Cloudflare tightening detection, not a bug in this logic.
+    NatWest's own site also has a native "Create job notification" email
+    alert feature (visible on the search page) as a more durable fallback
+    if this stops working.
 
     Job links are matched by the pattern /jobs/<numeric-id>-<slug>. Each
     link's inner text bundles together title + location + brand + category
@@ -200,16 +219,35 @@ def fetch_jobs_generic_html(site):
     days ago") — we split that on the site's known location label
     (config's "location_label") to isolate just the title.
     """
-    resp = requests.get(site["search_url"], headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    html = resp.text
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError(
+            "Playwright is required for 'generic_html' sites behind Cloudflare. "
+            "Install with: pip install playwright && playwright install chromium"
+        )
+
+    jobs = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        page.goto(site["search_url"], wait_until="domcontentloaded", timeout=45000)
+
+        # Wait for either the Cloudflare challenge to clear and job links to
+        # show up, or give up after a generous timeout.
+        try:
+            page.wait_for_selector('a[href*="/jobs/"]', timeout=30000)
+        except Exception as e:
+            print(f"  WARNING: job links never appeared (Cloudflare challenge may have blocked us): {e}")
+
+        html = page.content()
+        browser.close()
 
     link_pattern = re.compile(
         r'<a[^>]+href="(?P<href>/jobs/(?P<id>\d+)-[^"]+)"[^>]*>(?P<inner>.*?)</a>',
         re.DOTALL,
     )
 
-    jobs = []
     seen_ids = set()
     for m in link_pattern.finditer(html):
         job_id = m.group("id")
@@ -234,7 +272,7 @@ def fetch_jobs_generic_html(site):
         jobs.append({"id": job_id, "title": title, "url": url})
 
     if not jobs:
-        print("DEBUG: no job links matched — dumping first 2000 chars of fetched HTML:")
+        print("DEBUG: no job links matched — dumping first 2000 chars of rendered HTML:")
         print(html[:2000])
 
     return jobs
