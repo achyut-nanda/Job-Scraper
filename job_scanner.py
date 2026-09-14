@@ -18,6 +18,10 @@ different platforms:
     rendered like Phenom, no public API or bot-protection gate observed.
     Uses a headless browser and matches job links by the confirmed
     ".../jobs/<numeric-id>" URL shape.
+  - "successfactors_rmk": SAP SuccessFactors Recruiting Marketing / Career
+    Site Builder sites (e.g. BT Group). Has a documented internal JSON API
+    reachable with plain requests (no browser) once a CSRF token and
+    session cookie are obtained from an initial page fetch.
 
 For each site in config.json, this script:
   1. Fetches that site's current job postings (API call, browser render, or
@@ -259,6 +263,121 @@ def fetch_jobs_jibe(site):
     return jobs
 
 
+def fetch_jobs_successfactors(site):
+    """Fetch job postings from a SAP SuccessFactors Recruiting Marketing
+    (RMK) / Career Site Builder career site (e.g. BT Group) via its
+    internal JSON API — no headless browser needed here, unlike the other
+    enterprise platforms we've hit so far.
+
+    Two-step flow:
+      1. A GET request to the career site's base URL seeds a JSESSIONID
+         session cookie and embeds a CSRF token in the HTML (as a <meta>
+         tag, a data-csrf-token attribute, or an inline "x-csrf-token:"
+         marker — we try each pattern in order).
+      2. A POST to /services/recruiting/v1/jobs with that CSRF token as a
+         header and a fixed-shape JSON body (category/location filters,
+         page number). The JSESSIONID cookie rides along automatically via
+         the requests.Session().
+
+    The response has "jobSearchResult" (the postings on that page) and
+    "totalJobs" (used to know when to stop paging).
+
+    Config fields used:
+      - "base_url": the career site's root, e.g. "https://jobs.bt.com"
+      - "category_id": numeric category ID, visible in the site's own
+        "/go/<name>/<id>/" navigation links (e.g. BT's India category is
+        9053102 — this can be copied straight from the browser URL)
+      - "location_city" (optional): city name to filter on, matching the
+        site's own "facetFilters": {"jobLocationCity": [...]} shape
+    """
+    base_url = site["base_url"].rstrip("/")
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    resp = session.get(base_url, timeout=30)
+    resp.raise_for_status()
+    html = resp.text
+
+    csrf_token = None
+    for pattern in (
+        r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']',
+        r'data-csrf-token=["\']([^"\']+)["\']',
+        r'x-csrf-token["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+    ):
+        m = re.search(pattern, html, re.IGNORECASE)
+        if m:
+            csrf_token = m.group(1)
+            break
+
+    if not csrf_token:
+        print("  WARNING: could not find a CSRF token on the homepage — the API call below may fail with 403/404.")
+
+    api_url = f"{base_url}/services/recruiting/v1/jobs"
+    post_headers = {"Content-Type": "application/json"}
+    if csrf_token:
+        post_headers["x-csrf-token"] = csrf_token
+
+    facet_filters = {}
+    if site.get("location_city"):
+        facet_filters["jobLocationCity"] = [site["location_city"]]
+
+    jobs = []
+    page_number = 0
+    total_jobs = None
+    last_data = None
+
+    while True:
+        payload = {
+            "locale": "en_US",
+            "pageNumber": page_number,
+            "sortBy": "",
+            "keywords": "",
+            "location": "",
+            "facetFilters": facet_filters,
+            "brand": "",
+            "skills": [],
+            "categoryId": site.get("category_id", ""),
+            "alertId": "",
+            "rcmCandidateId": "",
+        }
+        resp = session.post(api_url, headers=post_headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        last_data = data
+
+        results = data.get("jobSearchResult", [])
+        if total_jobs is None:
+            total_jobs = data.get("totalJobs", len(results))
+
+        if not results:
+            break
+
+        for job in results:
+            job_id = job.get("id") or job.get("jobId")
+            title = job.get("title") or job.get("jobTitle") or job.get("postingTitle", "")
+            url_title = job.get("url_title") or job.get("urlTitle", "")
+            locales = job.get("locales") or ["en_US"]
+            locale = locales[0] if locales else "en_US"
+            if job_id and title:
+                job_url = (
+                    f"{base_url}/job/{url_title}/{job_id}-{locale}"
+                    if url_title
+                    else f"{base_url}/job/{job_id}-{locale}"
+                )
+                jobs.append({"id": str(job_id), "title": title, "url": job_url})
+
+        page_number += 1
+        if len(jobs) >= total_jobs or page_number > 20:  # safety cap on pagination
+            break
+
+    if not jobs and last_data is not None:
+        print("DEBUG: no jobs parsed — RAW response from the SuccessFactors API:")
+        print(json.dumps(last_data, indent=2)[:2000])
+
+    return jobs
+
+
 def fetch_jobs_generic_html(site):
     """Fetch job postings from a career site by rendering it with a headless
     browser and regex-matching job links from the rendered HTML.
@@ -405,6 +524,8 @@ def main():
                 jobs = fetch_jobs_generic_html(site)
             elif site_type == "jibe_icims":
                 jobs = fetch_jobs_jibe(site)
+            elif site_type == "successfactors_rmk":
+                jobs = fetch_jobs_successfactors(site)
             else:
                 print(f"  ERROR: unknown site type '{site_type}'", file=sys.stderr)
                 continue
