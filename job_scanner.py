@@ -312,6 +312,8 @@ def fetch_jobs_successfactors(site):
 
     if not csrf_token:
         print("  WARNING: could not find a CSRF token on the homepage — the API call below may fail with 403/404.")
+    else:
+        print(f"  DEBUG: found CSRF token (first 12 chars): {csrf_token[:12]}...")
 
     api_url = f"{base_url}/services/recruiting/v1/jobs"
     post_headers = {"Content-Type": "application/json"}
@@ -343,7 +345,13 @@ def fetch_jobs_successfactors(site):
         }
         resp = session.post(api_url, headers=post_headers, json=payload, timeout=30)
         resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            print(f"  DEBUG: POST to {api_url} returned non-JSON content.")
+            print(f"  DEBUG: status={resp.status_code} content-type={resp.headers.get('Content-Type')}")
+            print(f"  DEBUG: first 1000 chars of response body:\n{resp.text[:1000]}")
+            break
         last_data = data
 
         results = data.get("jobSearchResult", [])
