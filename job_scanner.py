@@ -14,6 +14,10 @@ different platforms:
     the Radancy platform) that use Cloudflare bot-protection — needs a
     headless browser too (to get past Cloudflare's JS challenge), but once
     past that, job data is plain HTML rather than a JS-rendered SPA.
+  - "js_rendered_search": generic client-rendered career site (e.g.
+    McKinsey's Next.js careers page) with no public API and no Cloudflare
+    gate — a headless browser renders the page, then job links are found
+    by a configurable URL substring (site's "job_link_contains").
 
 For each site in config.json, this script:
   1. Fetches that site's current job postings (API call, browser render, or
@@ -193,6 +197,68 @@ def fetch_jobs_phenom(site):
     return jobs
 
 
+def fetch_jobs_js_generic(site):
+    """Generic scraper for JavaScript-rendered career sites that don't fit
+    the other categories — no public API, no Cloudflare gate, just a
+    client-side-rendered results page (e.g. McKinsey's Next.js careers site).
+
+    Driven entirely by config, so new sites of this kind can be added
+    without writing new code:
+      - "job_link_contains": substring that identifies a job link's href
+        (e.g. "/careers/search-jobs/jobs/" for McKinsey)
+
+    Job ID is pulled from the trailing "-<digits>" at the end of the URL
+    path, matching the "<slug>-<id>" pattern used by McKinsey's job URLs
+    (e.g. .../capabilitiesinsightsanalyst-digitaltech-106450).
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError(
+            "Playwright is required for 'js_rendered_search' sites. "
+            "Install with: pip install playwright && playwright install chromium"
+        )
+
+    link_contains = site["job_link_contains"]
+
+    jobs = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        page.goto(site["search_url"], wait_until="domcontentloaded", timeout=45000)
+        try:
+            page.wait_for_selector(f'a[href*="{link_contains}"]', timeout=30000)
+        except Exception as e:
+            print(f"  WARNING: job links never appeared on the page: {e}")
+
+        anchors = page.query_selector_all(f'a[href*="{link_contains}"]')
+        seen_hrefs = set()
+        for a in anchors:
+            href = a.get_attribute("href")
+            title = (a.inner_text() or "").strip()
+            if not href or not title or href in seen_hrefs:
+                continue
+            seen_hrefs.add(href)
+
+            if href.startswith("/"):
+                href = f"https://{site['domain']}{href}"
+
+            match = re.search(r"-(\d+)(?:[/?#]|$)", href)
+            job_id = match.group(1) if match else href
+
+            jobs.append({"id": job_id, "title": title, "url": href})
+
+        if not jobs:
+            print("DEBUG: dumping all links found on the rendered page for troubleshooting:")
+            all_links = page.query_selector_all("a[href]")
+            for a in all_links[:40]:
+                print(f"  {a.get_attribute('href')}  |  {(a.inner_text() or '').strip()[:60]}")
+
+        browser.close()
+
+    return jobs
+
+
 def fetch_jobs_generic_html(site):
     """Fetch job postings from a career site by rendering it with a headless
     browser and regex-matching job links from the rendered HTML.
@@ -337,6 +403,8 @@ def main():
                 jobs = fetch_jobs_phenom(site)
             elif site_type == "generic_html":
                 jobs = fetch_jobs_generic_html(site)
+            elif site_type == "js_rendered_search":
+                jobs = fetch_jobs_js_generic(site)
             else:
                 print(f"  ERROR: unknown site type '{site_type}'", file=sys.stderr)
                 continue

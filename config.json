@@ -9,7 +9,8 @@
     "machine learning",
     "machine learning engineer",
     "software engineer",
-    "data engineer"
+    "data engineer",
+    "product manager"
   ],
   "sites": [
     {
@@ -32,6 +33,13 @@
       "domain": "jobs.natwestgroup.com",
       "search_url": "https://jobs.natwestgroup.com/search/data-insights-and-analytics-software-engineering-permanent/jobs/in/gurugram/country/india",
       "location_label": "Gurugram, India"
+    },
+    {
+      "name": "McKinsey & Company - Gurugram (Finance / Technology & Digital)",
+      "type": "js_rendered_search",
+      "domain": "www.mckinsey.com",
+      "search_url": "https://www.mckinsey.com/careers/search-jobs?cities=Gurugram&interest=Finance&interest=Technology+%26+Digital",
+      "job_link_contains": "/careers/search-jobs/jobs/"
     }
   ]
 }
