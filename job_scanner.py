@@ -206,6 +206,12 @@ def fetch_jobs_js_generic(site):
     without writing new code:
       - "job_link_contains": substring that identifies a job link's href
         (e.g. "/careers/search-jobs/jobs/" for McKinsey)
+      - "browser_engine" (optional, default "chromium"): some corporate
+        sites run bot-protection (e.g. Akamai) that specifically fingerprints
+        and blocks headless Chromium's TLS/HTTP2 signature, causing an
+        immediate net::ERR_HTTP2_PROTOCOL_ERROR before any page even loads.
+        Setting this to "firefox" is a known low-cost workaround — some
+        such systems don't fingerprint Firefox as aggressively.
 
     Job ID is pulled from the trailing "-<digits>" at the end of the URL
     path, matching the "<slug>-<id>" pattern used by McKinsey's job URLs
@@ -216,14 +222,16 @@ def fetch_jobs_js_generic(site):
     except ImportError:
         raise RuntimeError(
             "Playwright is required for 'js_rendered_search' sites. "
-            "Install with: pip install playwright && playwright install chromium"
+            "Install with: pip install playwright && playwright install chromium firefox"
         )
 
     link_contains = site["job_link_contains"]
+    browser_engine = site.get("browser_engine", "chromium")
 
     jobs = []
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        launcher = getattr(p, browser_engine)
+        browser = launcher.launch()
         page = browser.new_page(user_agent=HEADERS["User-Agent"])
         page.goto(site["search_url"], wait_until="domcontentloaded", timeout=45000)
         try:

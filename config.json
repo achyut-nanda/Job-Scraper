@@ -39,7 +39,8 @@
       "type": "js_rendered_search",
       "domain": "www.mckinsey.com",
       "search_url": "https://www.mckinsey.com/careers/search-jobs?cities=Gurugram&interest=Finance&interest=Technology+%26+Digital",
-      "job_link_contains": "/careers/search-jobs/jobs/"
+      "job_link_contains": "/careers/search-jobs/jobs/",
+      "browser_engine": "firefox"
     }
   ]
 }

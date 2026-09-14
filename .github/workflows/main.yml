@@ -23,8 +23,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Playwright browser
-        run: playwright install --with-deps chromium
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium firefox
 
       - name: Run scanner
         env:
@@ -32,8 +32,24 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python job_scanner.py
 
-      - name: Commit updated seen_jobs.json
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Update seen jobs list"
-          file_pattern: seen_jobs.json
+      - name: Commit and push updated seen_jobs.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen_jobs.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Update seen jobs list"
+          for i in 1 2 3 4 5; do
+            if git push; then
+              echo "Push succeeded on attempt $i"
+              exit 0
+            fi
+            echo "Push failed (attempt $i/5) — likely a transient GitHub error, retrying in 15s..."
+            sleep 15
+            git pull --rebase
+          done
+          echo "Push failed after 5 attempts"
+          exit 1
